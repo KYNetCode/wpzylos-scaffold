@@ -1,0 +1,29 @@
+name: Packagist Update
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+  release:
+    types: [published]
+
+jobs:
+  packagist:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug secrets presence
+        run: |
+          echo "USERNAME length: ${#PACKAGIST_USERNAME}"
+          echo "TOKEN length: ${#PACKAGIST_TOKEN}"
+        env:
+          PACKAGIST_USERNAME: ${{ secrets.PACKAGIST_USERNAME }}
+          PACKAGIST_TOKEN: ${{ secrets.PACKAGIST_TOKEN }}
+
+      - name: Notify Packagist
+        run: |
+          curl --fail-with-body -sS -X POST "https://packagist.org/api/update-package" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.PACKAGIST_USERNAME }}:${{ secrets.PACKAGIST_TOKEN }}" \
+            -H "User-Agent: github-actions (mailto:diggerwp@gmail.com)" \
+            -d '{"repository":"${{ github.server_url }}/${{ github.repository }}"}'

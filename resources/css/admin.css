@@ -1,0 +1,60 @@
+/**
+ * WPZylos Plugin â€” Admin Styles
+ *
+ * Table of Contents
+ * -----------------
+ * 1. Tailwind / DaisyUI Imports
+ * 2. Admin Layout & Wrapper
+ * 3. Navigation & Sidebar
+ * 4. Components (Cards, Badges, Buttons)
+ * 5. Forms & Inputs
+ * 6. Tables & Lists
+ * 7. Modals & Overlays
+ * 8. Alerts & Notifications
+ * 9. Dark Mode Overrides
+ * 10. Responsive / Media Queries
+ */
+
+/* ========================================================================== 
+   1. Tailwind / DaisyUI Imports
+   ========================================================================== */
+
+/*
+ * IMPORTANT:
+ * Do not import full Tailwind here:
+ *
+ * @import "tailwindcss" prefix(__CSS_PREFIX_NOHYPHEN__);
+ *
+ * Full Tailwind import loads Preflight/base reset globally and can break
+ * WordPress admin styles. We only load theme + utilities with plugin prefix.
+ */
+@layer theme, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme) prefix(__CSS_PREFIX_NOHYPHEN__);
+@import "tailwindcss/utilities.css" layer(utilities) prefix(__CSS_PREFIX_NOHYPHEN__);
+
+@plugin "daisyui" {
+    prefix: "__CSS_PREFIX__";
+    root: "#__CSS_PREFIX_NOHYPHEN__-admin";
+    themes: light --default, dark --prefersdark;
+}
+
+/* ========================================================================== 
+   2. Admin Layout & Wrapper
+   ========================================================================== */
+
+/*
+ * Keep custom admin styles scoped inside the plugin wrapper.
+ * Avoid global selectors like img, input, button, table, a, ul, li, etc.
+ */
+@layer components {
+    #__CSS_PREFIX_NOHYPHEN__-admin {
+        font-family: var(--__CSS_PREFIX_NOHYPHEN__-default-font-family, ui-sans-serif, system-ui, sans-serif);
+    }
+
+    #__CSS_PREFIX_NOHYPHEN__-admin img,
+    #__CSS_PREFIX_NOHYPHEN__-admin svg {
+        display: inline-block;
+        vertical-align: middle;
+    }
+}

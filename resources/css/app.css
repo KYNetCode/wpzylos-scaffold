@@ -1,0 +1,25 @@
+/**
+ * WPZylos Plugin â€” Frontend Styles
+ *
+ * Table of Contents
+ * -----------------
+ * 1. Tailwind / DaisyUI Imports
+ * 2. Base / Reset
+ * 3. Layout & Containers
+ * 4. Components (Forms, Buttons, Cards)
+ * 5. Shortcode Wrappers
+ * 6. Animations & Transitions
+ * 7. Dark Mode
+ * 8. Responsive / Media Queries
+ */
+
+/* ==========================================================================
+   1. Tailwind / DaisyUI Imports
+   ========================================================================== */
+@import "tailwindcss" prefix(__CSS_PREFIX_NOHYPHEN__);
+
+@plugin "daisyui" {
+    prefix: "__CSS_PREFIX__";
+}
+
+/* Plugin frontend styles */

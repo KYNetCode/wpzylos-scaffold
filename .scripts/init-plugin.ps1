@@ -1,0 +1,725 @@
+# ============================================================================
+# WPZylos Scaffold - Plugin Initializer (Intelligent)
+# ============================================================================
+# Handles all scenarios:
+# - Fresh install (my-plugin.php exists)
+# - Re-configuration (update existing config)
+# - Config deleted (detect from renamed files)
+# - Partial updates (only change specific values)
+#
+# Location: .scripts/init-plugin.ps1
+# Called by: ../scaffold.ps1
+# ============================================================================
+
+param(
+    [switch]$NonInteractive,
+    [string]$PluginName,
+    [string]$PluginSlug,
+    [string]$Namespace,
+    [string]$ScoperPrefix,
+    [string]$DbPrefix,
+    [string]$CssPrefix,
+    [string]$AuthorName,
+    [string]$AuthorUri,
+    [string]$PluginUri,
+    [string]$VendorName,
+    [string]$Version,
+    [string[]]$IncludeDirs,
+    [string[]]$IncludeFiles,
+    [string[]]$PromptedItems,
+    [string]$IntegrityUpdateUrl,
+    [string]$IntegrityUpdateToken
+)
+
+# ============================================================================
+# Change to project root (parent of .scripts)
+# ============================================================================
+
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$projectRoot = Split-Path -Parent $scriptDir
+Push-Location $projectRoot
+
+try {
+
+    # ============================================================================
+    # Helper Functions
+    # ============================================================================
+
+    function Write-Header {
+        Write-Host ""
+        Write-Host "  WPZylos Scaffold" -ForegroundColor Blue
+        Write-Host ""
+        Write-Host "  Plugin Initializer" -ForegroundColor DarkGray
+        Write-Host ""
+    }
+    function Write-Success {
+        param([string]$Message)
+        Write-Host "[OK] $Message" -ForegroundColor Green
+    }
+
+    function Write-Step {
+        param([int]$Step, [int]$Total, [string]$Message)
+        Write-Host "[$Step/$Total] $Message... " -NoNewline -ForegroundColor Yellow
+    }
+
+    function Write-Done {
+        Write-Host "Done" -ForegroundColor Green
+    }
+
+    function Write-Skip {
+        Write-Host "Skipped" -ForegroundColor Gray
+    }
+
+    function ConvertTo-PluginSlug {
+        param([string]$Name)
+        $slug = $Name.ToLower() -replace '[^a-z0-9\s]', '' -replace '\s+', '-'
+        return $slug.Trim('-')
+    }
+
+    function ConvertTo-Namespace {
+        param([string]$Slug)
+        $parts = $Slug -split '-'
+        $namespace = ($parts | ForEach-Object { (Get-Culture).TextInfo.ToTitleCase($_) }) -join ''
+        return $namespace
+    }
+
+    function ConvertTo-ScoperPrefix {
+        param([string]$Slug)
+        return $Slug -replace '-', '_'
+    }
+
+    function ConvertTo-DbPrefix {
+        param([string]$Slug)
+        return ($Slug -replace '-', '') + '_'
+    }
+
+    function ConvertTo-CssPrefix {
+        param([string]$Name)
+        $words = ($Name -replace '[^a-zA-Z\s]', '' -replace '\s+', ' ').Trim() -split ' '
+        $prefix = ($words | ForEach-Object { $_[0] }) -join ''
+        return $prefix.ToLower() + '-'
+    }
+
+    function ConvertTo-VendorName {
+        param([string]$AuthorName)
+        return ($AuthorName -replace '\s+', '').ToLower()
+    }
+
+    # Convert namespace to JSON format (double backslashes for JSON escaping)
+    # KYNetCode\BraCalculator -> KYNetCode\\BraCalculator
+    function ConvertTo-JsonNamespace {
+        param([string]$Namespace)
+        return $Namespace -replace '\\', '\\'
+    }
+
+    function Read-WithDefault {
+        param([string]$Prompt, [string]$Default)
+        $userInput = Read-Host "$Prompt [$Default]"
+        if ([string]::IsNullOrWhiteSpace($userInput)) {
+            return $Default
+        }
+        return $userInput
+    }
+
+    function Read-ListWithDefault {
+        param([string]$Prompt, [string[]]$Default)
+
+        $displayDefault = @($Default) -join ', '
+        $userInput = Read-Host "$Prompt [$displayDefault]"
+        if ([string]::IsNullOrWhiteSpace($userInput)) {
+            return @($Default)
+        }
+        if ($userInput.Trim() -eq '<none>') {
+            return @()
+        }
+        return @($userInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique)
+    }
+
+    # UTF8 encoding without BOM
+    $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+
+    function Replace-InFile {
+        param(
+            [string]$FilePath,
+            [string]$Find,
+            [string]$Replace
+        )
+        if (Test-Path $FilePath) {
+            $fullPath = (Resolve-Path $FilePath).Path
+            $content = [System.IO.File]::ReadAllText($fullPath, $Utf8NoBom)
+            $content = $content -creplace [regex]::Escape($Find), $Replace
+            [System.IO.File]::WriteAllText($fullPath, $content, $Utf8NoBom)
+        }
+    }
+
+    # Replace literal string in file (no regex, uses .NET String.Replace)
+    # Use this for simple version replacements to avoid regex edge cases
+    function Replace-Literal {
+        param(
+            [string]$FilePath,
+            [string]$Find,
+            [string]$Replace
+        )
+        if (Test-Path $FilePath) {
+            $fullPath = (Resolve-Path $FilePath).Path
+            $content = [System.IO.File]::ReadAllText($fullPath, $Utf8NoBom)
+            $content = $content.Replace($Find, $Replace)
+            [System.IO.File]::WriteAllText($fullPath, $content, $Utf8NoBom)
+        }
+    }
+
+    function Replace-InAllFiles {
+        param(
+            [string]$Find,
+            [string]$Replace,
+            [string[]]$Extensions = @('*.php', '*.json', '*.txt', '*.md')
+        )
+    
+        foreach ($ext in $Extensions) {
+            Get-ChildItem -Path . -Recurse -Filter $ext -File | 
+            Where-Object { $_.FullName -notmatch '[\\/]vendor[\\/]' -and $_.FullName -notmatch '[\\/]\.git[\\/]' -and $_.FullName -notmatch '[\\/]\.scripts[\\/]' } |
+            ForEach-Object {
+                $content = [System.IO.File]::ReadAllText($_.FullName, $Utf8NoBom)
+                if ($content -match [regex]::Escape($Find)) {
+                    $content = $content -creplace [regex]::Escape($Find), $Replace
+                    [System.IO.File]::WriteAllText($_.FullName, $content, $Utf8NoBom)
+                }
+            }
+        }
+    }
+
+    function Save-PluginConfig {
+        param([hashtable]$Config)
+        $configPath = ".plugin-config.json"
+        $fullPath = Join-Path $projectRoot $configPath
+        $json = $Config | ConvertTo-Json -Depth 3
+        [System.IO.File]::WriteAllText($fullPath, $json, $Utf8NoBom)
+    }
+
+    function Get-CurrentState {
+        $state = @{
+            IsFresh             = $false
+            HasConfig           = $false
+            CurrentName         = ""
+            CurrentSlug         = ""
+            CurrentNamespace    = ""
+            CurrentScoperPrefix = ""
+            CurrentDbPrefix     = ""
+            CurrentCssPrefix    = ""
+            CurrentAuthorName   = ""
+            CurrentAuthorUri    = ""
+            CurrentVendor       = ""
+            CurrentVersion      = ""
+            CurrentIncludeDirs  = @()
+            CurrentIncludeFiles = @()
+            CurrentPromptedItems = @()
+            CurrentIntegrityUpdateUrl = ""
+            CurrentIntegrityUpdateToken = ""
+            MainPluginFile      = ""
+        }
+    
+        # Check for config file
+        if (Test-Path ".plugin-config.json") {
+            $state.HasConfig = $true
+            try {
+                $config = Get-Content ".plugin-config.json" -Raw | ConvertFrom-Json
+                $state.CurrentName = $config.plugin.name
+                $state.CurrentSlug = $config.plugin.slug
+                $state.CurrentNamespace = $config.plugin.namespace
+                $state.CurrentScoperPrefix = $config.plugin.scoperPrefix
+                $state.CurrentDbPrefix = $config.plugin.dbPrefix
+                $state.CurrentCssPrefix = $config.plugin.cssPrefix
+                $state.CurrentAuthorName = $config.author.name
+                $state.CurrentAuthorUri = $config.author.uri
+                $state.CurrentVendor = $config.composer.vendor
+                $state.CurrentVersion = $config.plugin.version
+                $state.MainPluginFile = $config.plugin.mainFile
+                if ($config.build) {
+                    $state.CurrentIncludeDirs = @($config.build.includeDirs)
+                    $state.CurrentIncludeFiles = @($config.build.includeFiles)
+                    $state.CurrentPromptedItems = @($config.build.promptedItems)
+                    $state.CurrentIntegrityUpdateUrl = [string]$config.build.integrityUpdateUrl
+                    $state.CurrentIntegrityUpdateToken = [string]$config.build.integrityUpdateToken
+                }
+            }
+            catch {
+                Write-Host "Warning: Could not parse .plugin-config.json" -ForegroundColor Yellow
+            }
+        }
+    
+        # Check for fresh install
+        if (Test-Path "my-plugin.php") {
+            $state.IsFresh = $true
+            $state.MainPluginFile = "my-plugin.php"
+        }
+    
+        # If no config but not fresh, try to detect from files
+        if (-not $state.HasConfig -and -not $state.IsFresh) {
+            $mainFiles = Get-ChildItem -Path . -Filter "*.php" -File | Where-Object {
+                (Get-Content $_.FullName -Raw) -match "Plugin Name:"
+            }
+            if ($mainFiles.Count -gt 0) {
+                $mainFile = $mainFiles[0]
+                $state.MainPluginFile = $mainFile.Name
+                $state.CurrentSlug = $mainFile.BaseName
+                $content = Get-Content $mainFile.FullName -Raw
+                if ($content -match "Plugin Name:\s*(.+)") {
+                    $state.CurrentName = $Matches[1].Trim()
+                }
+                # Try to detect namespace from composer.json
+                if (Test-Path "composer.json") {
+                    $composer = Get-Content "composer.json" -Raw
+                    # Namespace auto-detection from composer.json autoload
+                    # $state.CurrentNamespace = auto-detected
+                }
+            }
+        }
+    
+        return $state
+    }
+
+    # ============================================================================
+    # Main Script
+    # ============================================================================
+
+    Write-Header
+
+    # Detect current state
+    $state = Get-CurrentState
+
+    # Show current status
+    if ($state.IsFresh) {
+        Write-Host "Fresh scaffold detected." -ForegroundColor Green
+        Write-Host ""
+    }
+    elseif ($state.HasConfig) {
+        Write-Host "Current Configuration:" -ForegroundColor Cyan
+        Write-Host "  Plugin Name:  $($state.CurrentName)" -ForegroundColor Gray
+        Write-Host "  Slug:         $($state.CurrentSlug)" -ForegroundColor Gray
+        Write-Host "  Namespace:    $($state.CurrentNamespace)" -ForegroundColor Gray
+        Write-Host "  DB Prefix:    $($state.CurrentDbPrefix)" -ForegroundColor Gray
+        Write-Host "  Version:      $($state.CurrentVersion)" -ForegroundColor Gray
+        Write-Host "  Vendor:       $($state.CurrentVendor)" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "You can update any value or press Enter to keep current." -ForegroundColor Yellow
+        Write-Host ""
+    }
+    elseif ($state.CurrentSlug) {
+        Write-Host "Config file missing but plugin detected: $($state.CurrentSlug)" -ForegroundColor Yellow
+        Write-Host "Values will be auto-detected where possible." -ForegroundColor Gray
+        Write-Host ""
+    }
+    else {
+        Write-Host "Error: Cannot detect plugin state." -ForegroundColor Red
+        Write-Host "Expected 'my-plugin.php' for fresh install or '.plugin-config.json' for existing." -ForegroundColor Red
+        Pop-Location
+        exit 1
+    }
+
+    # ============================================================================
+    # Collect Information
+    # ============================================================================
+
+    # Set defaults based on state
+    if ($state.IsFresh) {
+        $defaultName = "My Plugin"
+        $defaultSlug = "my-plugin"
+        $defaultNamespace = "MyPlugin"
+        $defaultScoperPrefix = "my_plugin"
+        $defaultDbPrefix = "myplugin_"
+        $defaultCssPrefix = "mp-"
+        $defaultVersion = "1.0.0"
+        $defaultAuthorName = "Your Name"
+        $defaultAuthorUri = "https://example.com"
+        $defaultVendor = "yourname"
+        $defaultIncludeDirs = @('app', 'bootstrap', 'config', 'resources', 'routes')
+        $defaultIncludeFiles = @('composer.json', 'LICENSE', 'readme.txt', 'uninstall.php', 'my-plugin.php')
+        $defaultPromptedItems = @()
+        $defaultIntegrityUpdateUrl = "https://license-verification.test/api/v1/plugin/integrity"
+        $defaultIntegrityUpdateToken = "wpzylos-local-integrity-update-token-2026"
+    }
+    else {
+        $defaultName = if ($state.CurrentName) { $state.CurrentName } else { "My Plugin" }
+        $defaultSlug = if ($state.CurrentSlug) { $state.CurrentSlug } else { "my-plugin" }
+        $defaultNamespace = if ($state.CurrentNamespace) { $state.CurrentNamespace } else { "MyPlugin" }
+        $defaultScoperPrefix = if ($state.CurrentScoperPrefix) { $state.CurrentScoperPrefix } else { "my_plugin" }
+        $defaultDbPrefix = if ($state.CurrentDbPrefix) { $state.CurrentDbPrefix } else { "myplugin_" }
+        $defaultCssPrefix = if ($state.CurrentCssPrefix) { $state.CurrentCssPrefix } else { "mp-" }
+        $defaultVersion = if ($state.CurrentVersion) { $state.CurrentVersion } else { "1.0.0" }
+        $defaultAuthorName = if ($state.CurrentAuthorName) { $state.CurrentAuthorName } else { "Your Name" }
+        $defaultAuthorUri = if ($state.CurrentAuthorUri) { $state.CurrentAuthorUri } else { "https://example.com" }
+        $defaultVendor = if ($state.CurrentVendor) { $state.CurrentVendor } else { "yourname" }
+        $defaultIncludeDirs = @($state.CurrentIncludeDirs)
+        $defaultIncludeFiles = @($state.CurrentIncludeFiles)
+        $defaultPromptedItems = @($state.CurrentPromptedItems)
+        $defaultIntegrityUpdateUrl = if ($state.CurrentIntegrityUpdateUrl) { $state.CurrentIntegrityUpdateUrl } else { "https://license-verification.test/api/v1/plugin/integrity" }
+        $defaultIntegrityUpdateToken = if ($state.CurrentIntegrityUpdateToken) { $state.CurrentIntegrityUpdateToken } else { "wpzylos-local-integrity-update-token-2026" }
+    }
+
+    if (-not $NonInteractive) {
+        Write-Host "Enter your plugin display name (or press Enter to keep current):" -ForegroundColor White
+        $PluginName = Read-WithDefault "> Plugin Name" $defaultName
+    
+        # Only derive new values if name changed
+        if ($PluginName -ne $defaultName) {
+            $derivedSlug = ConvertTo-PluginSlug $PluginName
+            $derivedNamespace = ConvertTo-Namespace $derivedSlug
+            $derivedScoperPrefix = ConvertTo-ScoperPrefix $derivedSlug
+            $derivedDbPrefix = ConvertTo-DbPrefix $derivedSlug
+            $derivedCssPrefix = ConvertTo-CssPrefix $PluginName
+        }
+        else {
+            $derivedSlug = $defaultSlug
+            $derivedNamespace = $defaultNamespace
+            $derivedScoperPrefix = $defaultScoperPrefix
+            $derivedDbPrefix = $defaultDbPrefix
+            $derivedCssPrefix = $defaultCssPrefix
+        }
+    
+        Write-Host ""
+        Write-Host "Derived/Current values (press Enter to accept, or type to override):" -ForegroundColor White
+    
+        $PluginSlug = Read-WithDefault "  Plugin Slug" $derivedSlug
+        $Namespace = Read-WithDefault "  PHP Namespace" $derivedNamespace
+        $ScoperPrefix = Read-WithDefault "  Scoper Prefix" $derivedScoperPrefix
+        $DbPrefix = Read-WithDefault "  Database Prefix" $derivedDbPrefix
+        $CssPrefix = Read-WithDefault "  CSS Prefix" $derivedCssPrefix
+    
+        Write-Host ""
+        Write-Host "Author information (press Enter to keep current):" -ForegroundColor White
+        $AuthorName = Read-WithDefault "  Author Name" $defaultAuthorName
+        $AuthorUri = Read-WithDefault "  Author URI" $defaultAuthorUri
+        # Plugin URI - derive from Author URI if available
+        $derivedPluginUri = if ($AuthorUri -and $AuthorUri -ne "https://example.com") {
+            "$AuthorUri/$PluginSlug"
+        }
+        else {
+            "https://example.com/$PluginSlug"
+        }
+        $PluginUri = Read-WithDefault "  Plugin URI" $derivedPluginUri
+    
+        # Vendor name
+        if ($AuthorName -ne $defaultAuthorName) {
+            $newDefaultVendor = ConvertTo-VendorName $AuthorName
+        }
+        else {
+            $newDefaultVendor = $defaultVendor
+        }
+        $VendorName = (Read-WithDefault "  Vendor Name (for composer)" $newDefaultVendor).ToLower() -replace '[^a-z0-9]', ''
+    
+        # Version
+        $Version = Read-WithDefault "  Version" $defaultVersion
+
+        Write-Host ""
+        Write-Host "Build configuration (comma-separated; type <none> to clear a list):" -ForegroundColor White
+        $IncludeDirs = @(Read-ListWithDefault "  Include Directories" $defaultIncludeDirs)
+        $IncludeFiles = @(Read-ListWithDefault "  Include Files" $defaultIncludeFiles)
+        $PromptedItems = @(Read-ListWithDefault "  Previously Prompted Items" $defaultPromptedItems)
+        $IntegrityUpdateUrl = Read-WithDefault "  Integrity API Endpoint" $defaultIntegrityUpdateUrl
+        $IntegrityUpdateToken = Read-WithDefault "  Integrity API Key/Token" $defaultIntegrityUpdateToken
+    
+        Write-Host ""
+        Write-Host "Summary:" -ForegroundColor White
+        Write-Host "  Plugin Name:    $PluginName" -ForegroundColor Gray
+        Write-Host "  Plugin Slug:    $PluginSlug" -ForegroundColor Gray
+        Write-Host "  Namespace:      $Namespace" -ForegroundColor Gray
+        Write-Host "  Scoper Prefix:  $ScoperPrefix" -ForegroundColor Gray
+        Write-Host "  DB Prefix:      $DbPrefix" -ForegroundColor Gray
+        Write-Host "  CSS Prefix:     $CssPrefix" -ForegroundColor Gray
+        Write-Host "  Version:        $Version" -ForegroundColor Gray
+        Write-Host "  Vendor:         $VendorName" -ForegroundColor Gray
+        Write-Host "  Composer Name:  $VendorName/$PluginSlug" -ForegroundColor Gray
+        Write-Host "  Include Dirs:   $($IncludeDirs -join ', ')" -ForegroundColor Gray
+        Write-Host "  Include Files:  $($IncludeFiles -join ', ')" -ForegroundColor Gray
+        Write-Host "  Integrity API:  $IntegrityUpdateUrl" -ForegroundColor Gray
+        Write-Host ""
+    
+        $confirm = Read-Host "Proceed with initialization? [Y/n]"
+        if ($confirm -eq 'n' -or $confirm -eq 'N') {
+            Write-Host "Cancelled." -ForegroundColor Yellow
+            Pop-Location
+            exit 0
+        }
+    }
+    else {
+        # Non-interactive mode
+        if ([string]::IsNullOrWhiteSpace($PluginName)) { $PluginName = $defaultName }
+        if ([string]::IsNullOrWhiteSpace($PluginSlug)) { $PluginSlug = $defaultSlug }
+        if ([string]::IsNullOrWhiteSpace($Namespace)) { $Namespace = $defaultNamespace }
+        if ([string]::IsNullOrWhiteSpace($ScoperPrefix)) { $ScoperPrefix = $defaultScoperPrefix }
+        if ([string]::IsNullOrWhiteSpace($DbPrefix)) { $DbPrefix = $defaultDbPrefix }
+        if ([string]::IsNullOrWhiteSpace($CssPrefix)) { $CssPrefix = $defaultCssPrefix }
+        if ([string]::IsNullOrWhiteSpace($AuthorName)) { $AuthorName = $defaultAuthorName }
+        if ([string]::IsNullOrWhiteSpace($AuthorUri)) { $AuthorUri = $defaultAuthorUri }
+        if ([string]::IsNullOrWhiteSpace($PluginUri)) { $PluginUri = "https://example.com/$PluginSlug" }
+        if ([string]::IsNullOrWhiteSpace($VendorName)) { $VendorName = ConvertTo-VendorName $AuthorName }
+        if ([string]::IsNullOrWhiteSpace($Version)) { $Version = $defaultVersion }
+        if ($null -eq $IncludeDirs) { $IncludeDirs = @($defaultIncludeDirs) }
+        if ($null -eq $IncludeFiles) { $IncludeFiles = @($defaultIncludeFiles) }
+        if ($null -eq $PromptedItems) { $PromptedItems = @($defaultPromptedItems) }
+        if ([string]::IsNullOrWhiteSpace($IntegrityUpdateUrl)) { $IntegrityUpdateUrl = $defaultIntegrityUpdateUrl }
+        if ([string]::IsNullOrWhiteSpace($IntegrityUpdateToken)) { $IntegrityUpdateToken = $defaultIntegrityUpdateToken }
+    }
+
+    Write-Host ""
+
+    # ============================================================================
+    # Determine what needs to change
+    # ============================================================================
+
+    if ($state.IsFresh) {
+        $oldName = "My Plugin"
+        $oldSlug = "my-plugin"
+        $oldNamespace = "MyPlugin"
+        $oldScoperPrefix = "my_plugin"
+        $oldDbPrefix = "myplugin_"
+        $oldVendor = "KYNetCode"
+        $mainPluginFile = "my-plugin.php"
+    }
+    else {
+        $oldName = if ($state.CurrentName) { $state.CurrentName } else { "My Plugin" }
+        $oldSlug = if ($state.CurrentSlug) { $state.CurrentSlug } else { "my-plugin" }
+        $oldNamespace = if ($state.CurrentNamespace) { $state.CurrentNamespace } else { "MyPlugin" }
+        $oldScoperPrefix = if ($state.CurrentScoperPrefix) { $state.CurrentScoperPrefix } else { "my_plugin" }
+        $oldDbPrefix = if ($state.CurrentDbPrefix) { $state.CurrentDbPrefix } else { "myplugin_" }
+        $oldVendor = if ($state.CurrentVendor) { $state.CurrentVendor } else { "KYNetCode" }
+        $mainPluginFile = if ($state.MainPluginFile) { $state.MainPluginFile } else { "$oldSlug.php" }
+    }
+
+    # ============================================================================
+    # Perform Replacements (only if values changed)
+    # ============================================================================
+
+    $totalSteps = 10
+
+    # Step 1: Replace display name
+    Write-Step 1 $totalSteps "Replacing display name"
+    if ($PluginName -ne $oldName) {
+        Replace-InAllFiles -Find $oldName -Replace $PluginName
+        Write-Done
+    }
+    else {
+        Write-Skip
+    }
+
+    # Step 2: Replace plugin slug
+    Write-Step 2 $totalSteps "Replacing plugin slug"
+    if ($PluginSlug -ne $oldSlug) {
+        Replace-InAllFiles -Find $oldSlug -Replace $PluginSlug
+        Write-Done
+    }
+    else {
+        Write-Skip
+    }
+
+    # Step 3: Replace namespace
+    Write-Step 3 $totalSteps "Replacing namespace"
+    if ($Namespace -ne $oldNamespace) {
+        # For PHP, TXT, MD files - use single backslash namespace
+        Replace-InAllFiles -Find $oldNamespace -Replace $Namespace -Extensions @('*.php', '*.txt', '*.md')
+        # For JSON files - use double backslash namespace (JSON escaping)
+        $oldJsonNamespace = ConvertTo-JsonNamespace $oldNamespace
+        $newJsonNamespace = ConvertTo-JsonNamespace $Namespace
+        Replace-InAllFiles -Find $oldJsonNamespace -Replace $newJsonNamespace -Extensions @('*.json')
+        # Also update the 'namespace' => 'Value' and 'name' => 'Value' in PluginContext::create()
+        Replace-InFile -FilePath $mainPluginFile -Find "'namespace'  => '$oldNamespace'" -Replace "'namespace'  => '$Namespace'"
+        Replace-InFile -FilePath $mainPluginFile -Find "'namespace' => '$oldNamespace'" -Replace "'namespace' => '$Namespace'"
+        Write-Done
+    }
+    else {
+        Write-Skip
+    }
+
+    # Step 4: Replace scoper prefix
+    Write-Step 4 $totalSteps "Replacing scoper prefix"
+    if ($ScoperPrefix -ne $oldScoperPrefix) {
+        Replace-InFile -FilePath "scoper.inc.php" -Find $oldScoperPrefix -Replace $ScoperPrefix
+        Write-Done
+    }
+    else {
+        Write-Skip
+    }
+
+    # Step 5: Replace database prefix
+    Write-Step 5 $totalSteps "Replacing database prefix"
+    if ($DbPrefix -ne $oldDbPrefix) {
+        Replace-InAllFiles -Find $oldDbPrefix -Replace $DbPrefix
+        Write-Done
+    }
+    else {
+        Write-Skip
+    }
+
+    # Step 5b: Replace CSS prefix
+    Write-Step 5 $totalSteps "Replacing CSS prefix"
+    $cssNohyphen = $CssPrefix.TrimEnd('-')
+    # Fresh install / placeholder replacement: swap __CSS_PREFIX__ tokens across all eligible files
+    Get-ChildItem -Recurse -Include *.css,*.js,*.json,*.php -File |
+        Where-Object { $_.FullName -notmatch '[\\]vendor[\\]' -and $_.FullName -notmatch '[\\]\.git[\\]' } |
+        ForEach-Object {
+            $content = Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue
+            if ($content -and ($content -match '__CSS_PREFIX__' -or $content -match '__CSS_PREFIX_NOHYPHEN__')) {
+                $content = $content -replace '__CSS_PREFIX__', $CssPrefix
+                $content = $content -replace '__CSS_PREFIX_NOHYPHEN__', $cssNohyphen
+                [System.IO.File]::WriteAllText($_.FullName, $content, $Utf8NoBom)
+                Write-Host "    Updated: $($_.Name)" -ForegroundColor DarkGray
+            }
+        }
+    # Re-init: update existing css_prefix value in config/ui.php when the prefix has changed
+    $oldCssForFile = if ($state.CurrentCssPrefix) { $state.CurrentCssPrefix } else { "mp-" }
+    if ($CssPrefix -ne $oldCssForFile) {
+        Replace-InFile -FilePath "config/ui.php" -Find "'css_prefix' => '$oldCssForFile'" -Replace "'css_prefix' => '$CssPrefix'"
+        Write-Host "    Updated: config/ui.php (css_prefix: $oldCssForFile -> $CssPrefix)" -ForegroundColor DarkGray
+    }
+    Write-Done
+
+    # Step 5c: Update plugin display name in PluginContext::create()
+    Write-Step 5 $totalSteps "Updating plugin display name in PluginContext"
+    if ($PluginName -ne $oldName) {
+        Replace-InFile -FilePath $mainPluginFile -Find "'name'       => '$oldName'" -Replace "'name'       => '$PluginName'"
+        Replace-InFile -FilePath $mainPluginFile -Find "'name' => '$oldName'" -Replace "'name' => '$PluginName'"
+    }
+    Write-Done
+
+    # Step 6: Replace global variable
+    Write-Step 6 $totalSteps "Replacing global variable name"
+    if ($PluginSlug -ne $oldSlug) {
+        $oldGlobalVar = '$' + ($oldSlug -replace '-', '_') + '_context'
+        $newGlobalVar = '$' + ($PluginSlug -replace '-', '_') + '_context'
+        $oldGlobalContextKey = "`$GLOBALS['" + ($oldSlug -replace '-', '_') + "_context']"
+        $newGlobalContextKey = "`$GLOBALS['" + ($PluginSlug -replace '-', '_') + "_context']"
+        $oldGlobalAppKey = "`$GLOBALS['" + ($oldSlug -replace '-', '_') + "_app']"
+        $newGlobalAppKey = "`$GLOBALS['" + ($PluginSlug -replace '-', '_') + "_app']"
+        Replace-InFile -FilePath $mainPluginFile -Find $oldGlobalVar -Replace $newGlobalVar
+        Replace-InFile -FilePath $mainPluginFile -Find $oldGlobalContextKey -Replace $newGlobalContextKey
+        Replace-InFile -FilePath "app/Core/Plugin.php" -Find $oldGlobalAppKey -Replace $newGlobalAppKey
+        Write-Done
+    }
+    else {
+        Write-Skip
+    }
+
+    # Step 7: Update composer.json package name
+    Write-Step 7 $totalSteps "Updating composer.json package name"
+    if ($VendorName -ne $oldVendor -or $PluginSlug -ne $oldSlug) {
+        Replace-InFile -FilePath "composer.json" -Find "$oldVendor/$oldSlug" -Replace "$VendorName/$PluginSlug"
+        # Also update if still has scaffold name
+        Replace-InFile -FilePath "composer.json" -Find "KYNetCode/wpzylos-scaffold" -Replace "$VendorName/$PluginSlug"
+        Write-Done
+    }
+    else {
+        Write-Skip
+    }
+
+    # Step 8: Update author information
+    Write-Step 8 $totalSteps "Updating author information"
+    Replace-InFile -FilePath $mainPluginFile -Find "Your Name" -Replace $AuthorName
+    Replace-InFile -FilePath $mainPluginFile -Find "https://example.com/$oldSlug" -Replace $PluginUri
+    Replace-InFile -FilePath $mainPluginFile -Find "https://example.com" -Replace $AuthorUri
+    Replace-InFile -FilePath "readme.txt" -Find "your-username" -Replace (ConvertTo-VendorName $AuthorName)
+    Write-Done
+
+    # Step 8b: Update version in files
+    Write-Step 8 $totalSteps "Updating version"
+    $oldVersion = if ($state.CurrentVersion) { $state.CurrentVersion } else { "1.0.0" }
+    # Get the actual main plugin file from config (after possible rename)
+    $actualMainFile = if ($PluginSlug -ne $oldSlug -and (Test-Path "$PluginSlug.php")) { "$PluginSlug.php" } else { $mainPluginFile }
+    if ($Version -ne $oldVersion) {
+        # Update plugin header Version (format: "* Version: X.X.X") - use Replace-Literal for exact match
+        Replace-Literal -FilePath $actualMainFile -Find "Version: $oldVersion" -Replace "Version: $Version"
+        # Update PluginContext version (format: "'version' => 'X.X.X'")
+        Replace-Literal -FilePath $actualMainFile -Find "'version' => '$oldVersion'" -Replace "'version' => '$Version'"
+        # Update readme.txt Stable tag
+        Replace-Literal -FilePath "readme.txt" -Find "Stable tag: $oldVersion" -Replace "Stable tag: $Version"
+        Write-Done
+    }
+    else {
+        Write-Skip
+    }
+
+    # Step 9: Rename main plugin file
+    Write-Step 9 $totalSteps "Renaming plugin file"
+    if ((Test-Path $mainPluginFile) -and $PluginSlug -ne $oldSlug) {
+        Replace-InFile -FilePath "scoper.inc.php" -Find $mainPluginFile -Replace "$PluginSlug.php"
+        Replace-InFile -FilePath "uninstall.php" -Find $mainPluginFile -Replace "$PluginSlug.php"
+        Rename-Item -Path $mainPluginFile -NewName "$PluginSlug.php"
+        Write-Done
+    }
+    else {
+        Write-Skip
+    }
+
+    # Step 10: Save configuration
+    Write-Step 10 $totalSteps "Saving plugin configuration"
+    $targetMainFile = "$PluginSlug.php"
+    $oldDefaultMainFile = "$oldSlug.php"
+    $IncludeFiles = @($IncludeFiles | Where-Object { $_ -ne $mainPluginFile -and $_ -ne $oldDefaultMainFile })
+    if ($targetMainFile -notin $IncludeFiles) { $IncludeFiles += $targetMainFile }
+    $config = @{
+        initialized = $true
+        timestamp   = (Get-Date).ToString("yyyy-MM-ddTHH:mm:sszzz")
+        plugin      = @{
+            name         = $PluginName
+            slug         = $PluginSlug
+            namespace    = $Namespace
+            scoperPrefix = $ScoperPrefix
+            dbPrefix     = $DbPrefix
+            cssPrefix    = $CssPrefix
+            version      = $Version
+            mainFile     = $targetMainFile
+        }
+        author      = @{
+            name = $AuthorName
+            uri  = $AuthorUri
+        }
+        composer    = @{
+            vendor = $VendorName
+            name   = "$VendorName/$PluginSlug"
+        }
+        build       = @{
+            includeDirs          = @($IncludeDirs)
+            includeFiles         = @($IncludeFiles)
+            promptedItems        = @($PromptedItems)
+            integrityUpdateUrl   = $IntegrityUpdateUrl
+            integrityUpdateToken = $IntegrityUpdateToken
+        }
+    }
+    Save-PluginConfig -Config $config
+    Write-Done
+
+    # ============================================================================
+    # Post-Processing
+    # ============================================================================
+
+    Write-Host ""
+    Write-Host "Running composer dump-autoload..." -ForegroundColor Yellow
+
+    $composerResult = & composer dump-autoload 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Success "Composer autoload updated"
+    }
+    else {
+        Write-Host "Warning: composer dump-autoload failed. Run it manually." -ForegroundColor Yellow
+    }
+
+    # ============================================================================
+    # Success Message
+    # ============================================================================
+
+    Write-Host ""
+    Write-Host "=============================================" -ForegroundColor Green
+    Write-Host "  Plugin '$PluginName' configured!" -ForegroundColor Green
+    Write-Host "=============================================" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Configuration saved to: .plugin-config.json" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Next steps:" -ForegroundColor White
+    Write-Host "  1. Run: composer install" -ForegroundColor Gray
+    Write-Host "  2. Develop your plugin" -ForegroundColor Gray
+    Write-Host "  3. Build: .\scaffold.ps1 build" -ForegroundColor Gray
+    Write-Host ""
+
+}
+finally {
+    Pop-Location
+}

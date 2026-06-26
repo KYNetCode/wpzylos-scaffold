@@ -1,0 +1,22 @@
+includes:
+    - vendor/szepeviktor/phpstan-wordpress/extension.neon
+
+parameters:
+    level: 5
+    paths:
+        - app
+    scanFiles:
+        - phpstan-stubs/elementor.stub.php
+        - phpstan-stubs/woocommerce-admin-functions.stub.php
+    excludePaths:
+        - tests
+    ignoreErrors:
+        -
+            identifier: missingType.iterableValue
+        -
+            message: '#Unsafe usage of new static\(\)#'
+            path: app/Core/PluginContext.php
+        -
+            message: '#Empty array passed to foreach#'
+            path: app/Lifecycle/Uninstaller.php
+    reportUnmatchedIgnoredErrors: false
