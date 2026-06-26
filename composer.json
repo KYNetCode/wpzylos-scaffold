@@ -1,5 +1,6 @@
 {
   "name": "kynetcode/wpzylos-scaffold",
+  "version": "1.0.0",
   "description": "Template repository for creating production-ready WPZylos-based WordPress plugins with MVC architecture, dependency injection, and PHP-Scoper namespace isolation",
   "type": "wordpress-plugin",
   "license": "GPL-2.0-or-later",
